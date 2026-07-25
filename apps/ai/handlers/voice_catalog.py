@@ -79,6 +79,13 @@ STATIC_VOICE_CATALOG = {
             "runtime_model": "us.amazon.nova-lite-v1:0",
             "streaming": True,
         },
+        {
+            "provider": "google",
+            "id": "gemini-2.5-flash",
+            "label": "Gemini 2.5 Flash",
+            "runtime_model": "gemini-2.5-flash",
+            "streaming": True,
+        },
     ],
     "tts_models": [
         {

@@ -155,7 +155,7 @@ def provider_section(value: str | None):
     if not value or "/" not in value:
         return None
     provider, model = value.split("/", 1)
-    if provider in {"deepgram", "sarvam", "bedrock", "elevenlabs"}:
+    if provider in {"deepgram", "sarvam", "bedrock", "elevenlabs", "google"}:
         return {"provider": provider, "model": model}
     return None
 

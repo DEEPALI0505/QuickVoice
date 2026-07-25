@@ -1,0 +1,134 @@
+diff --git a/apps/ai/.env.dev.example b/apps/ai/.env.dev.example
+index f66960e..e2c3ffd 100644
+--- a/apps/ai/.env.dev.example
++++ b/apps/ai/.env.dev.example
+@@ -31,6 +31,13 @@ SARVAM_DEFAULT_TTS_MODEL=bulbul:v3
+ SARVAM_DEFAULT_LANGUAGE=en-IN
+ SARVAM_DEFAULT_SPEAKER=shubh
+ 
++# Langfuse tracing - create a project at https://cloud.langfuse.com and
++# paste the API key pair from Project Settings > API Keys. Leave blank to
++# run without tracing.
++LANGFUSE_PUBLIC_KEY=
++LANGFUSE_SECRET_KEY=
++LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
++
+ PINECONE_API_KEY=dev-pinecone-api-key
+ PINECONE_HOST=https://your-pinecone-index-host
+ PINECONE_EMBEDDING_MODEL=llama-text-embed-v2
+diff --git a/apps/ai/main.py b/apps/ai/main.py
+index 4887a4b..c1bcea5 100644
+--- a/apps/ai/main.py
++++ b/apps/ai/main.py
+@@ -41,6 +41,7 @@ from handlers.voice_provider_adapters import ProviderAdapterError, build_voice_p
+ from handlers.voice_worker_metadata import is_voice_session_metadata, parse_voice_session_metadata
+ from utils.logger import logger
+ from utils.logger import redact_sensitive
++from utils.langfuse_tracing import setup_langfuse
+ import asyncio
+ import json
+ from datetime import datetime, timezone
+@@ -437,6 +438,10 @@ class Assistant(Agent):
+ async def entrypoint(ctx: JobContext):
+     logger.info("Entrypoint called with room: {}", redact_sensitive(ctx.room.name))
+ 
++    # Route this session's STT/LLM/TTS/turn-detection spans to Langfuse.
++    # No-op (returns None) if LANGFUSE_* env vars aren't set.
++    trace_provider = setup_langfuse(metadata={"langfuse.session.id": ctx.room.name})
++
+     await ctx.connect()
+     raw_metadata = ctx.job.metadata or ""
+     if is_voice_session_metadata(raw_metadata):
+@@ -606,6 +611,14 @@ async def entrypoint(ctx: JobContext):
+                 "[LIVE_TRANSCRIPT] Failed to close publisher: {}",
+                 redact_sensitive(str(error)),
+             )
++        if trace_provider is not None:
++            try:
++                trace_provider.force_flush()
++            except Exception as error:
++                logger.warning(
++                    "[LANGFUSE] Failed to flush trace spans: {}",
++                    redact_sensitive(str(error)),
++                )
+         if preview_mode:
+             return
+         try:
+diff --git a/apps/ai/requirements.txt b/apps/ai/requirements.txt
+index 96bcb3e..5f8cef1 100644
+--- a/apps/ai/requirements.txt
++++ b/apps/ai/requirements.txt
+@@ -20,3 +20,6 @@ xlrd>=2.0,<3
+ httpx>=0.27,<1
+ beautifulsoup4>=4.12,<5
+ redis>=5,<7
++# Langfuse tracing (OpenTelemetry OTLP export)
++opentelemetry-sdk>=1.27,<2
++opentelemetry-exporter-otlp-proto-http>=1.27,<2
+diff --git a/apps/ai/utils/langfuse_tracing.py b/apps/ai/utils/langfuse_tracing.py
+new file mode 100644
+index 0000000..1425eb0
+--- /dev/null
++++ b/apps/ai/utils/langfuse_tracing.py
+@@ -0,0 +1,61 @@
++"""Langfuse tracing setup for the LiveKit voice agent.
++
++LiveKit Agents instruments each session with OpenTelemetry spans (STT, LLM,
++TTS, turn-detection, tool calls, latency metrics). This module routes those
++spans to Langfuse over the OpenTelemetry Protocol (OTLP), so every call gets
++a full trace tree in the Langfuse dashboard.
++
++Reference: https://docs.livekit.io/deploy/observability/tracing/
++"""
++
++import base64
++import os
++from typing import Optional
++
++from opentelemetry.sdk.trace import TracerProvider
++from opentelemetry.util.types import AttributeValue
++
++from utils.logger import logger, redact_sensitive
++
++
++def setup_langfuse(
++    metadata: Optional[dict[str, AttributeValue]] = None,
++) -> Optional[TracerProvider]:
++    """Configure OpenTelemetry to export LiveKit agent spans to Langfuse.
++
++    Reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_BASE_URL from
++    the environment. If any are missing, tracing is skipped (returns None)
++    instead of raising, so local dev / CI without Langfuse keys still runs.
++
++    Call this once per job, before `AgentSession(...)` / `session.start(...)`,
++    and register `trace_provider.force_flush` on the job's shutdown callback
++    so buffered spans are sent before the worker process exits.
++    """
++    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
++    secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
++    base_url = os.environ.get("LANGFUSE_BASE_URL")
++
++    if not public_key or not secret_key or not base_url:
++        logger.warning(
++            "[LANGFUSE] tracing disabled - set LANGFUSE_PUBLIC_KEY, "
++            "LANGFUSE_SECRET_KEY, and LANGFUSE_BASE_URL to enable"
++        )
++        return None
++
++    from livekit.agents.telemetry import set_tracer_provider
++    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
++    from opentelemetry.sdk.trace.export import BatchSpanProcessor
++
++    langfuse_auth = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
++    os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"{base_url.rstrip('/')}/api/public/otel"
++    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = f"Authorization=Basic {langfuse_auth}"
++
++    trace_provider = TracerProvider()
++    trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
++    set_tracer_provider(trace_provider, metadata=metadata)
++
++    logger.info(
++        "[LANGFUSE] tracing enabled, exporting to {}",
++        redact_sensitive(base_url),
++    )
++    return trace_provider

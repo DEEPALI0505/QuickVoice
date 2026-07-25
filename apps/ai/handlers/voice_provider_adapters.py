@@ -2,8 +2,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from livekit.plugins import aws, deepgram, elevenlabs, sarvam
-
+from livekit.plugins import aws, deepgram, elevenlabs, google, sarvam
 
 class ProviderAdapterError(RuntimeError):
     pass
