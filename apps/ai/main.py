@@ -41,6 +41,7 @@ from handlers.voice_provider_adapters import ProviderAdapterError, build_voice_p
 from handlers.voice_worker_metadata import is_voice_session_metadata, parse_voice_session_metadata
 from utils.logger import logger
 from utils.logger import redact_sensitive
+from utils.langfuse_tracing import setup_langfuse
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -437,6 +438,10 @@ class Assistant(Agent):
 async def entrypoint(ctx: JobContext):
     logger.info("Entrypoint called with room: {}", redact_sensitive(ctx.room.name))
 
+    # Route this session's STT/LLM/TTS/turn-detection spans to Langfuse.
+    # No-op (returns None) if LANGFUSE_* env vars aren't set.
+    trace_provider = setup_langfuse(metadata={"langfuse.session.id": ctx.room.name})
+
     await ctx.connect()
     raw_metadata = ctx.job.metadata or ""
     if is_voice_session_metadata(raw_metadata):
@@ -606,6 +611,14 @@ async def entrypoint(ctx: JobContext):
                 "[LIVE_TRANSCRIPT] Failed to close publisher: {}",
                 redact_sensitive(str(error)),
             )
+        if trace_provider is not None:
+            try:
+                trace_provider.force_flush()
+            except Exception as error:
+                logger.warning(
+                    "[LANGFUSE] Failed to flush trace spans: {}",
+                    redact_sensitive(str(error)),
+                )
         if preview_mode:
             return
         try:
